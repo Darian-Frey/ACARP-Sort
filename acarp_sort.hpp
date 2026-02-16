@@ -5,6 +5,11 @@
 #include <cstring>
 #include <vector>
 
+// Include SIMD intrinsics if AVX2 is available
+#if defined(__AVX2__) || defined(__march_native__)
+#include <immintrin.h>
+#endif
+
 namespace acarp {
 
 struct BucketPlan {
@@ -39,7 +44,6 @@ inline void insertion_sort(std::int64_t* first, std::int64_t* last) {
     }
 }
 
-// Turbo ACARP with K=256 and Scratch-Buffer Support
 template<int K = 256, int BUF_CAP = 16>
 struct ACARP_Sort {
     static_assert((K & (K - 1)) == 0, "K must be power of 2");
@@ -50,7 +54,6 @@ struct ACARP_Sort {
             return;
         }
 
-        // Manage scratch memory
         std::vector<std::int64_t> internal_scratch;
         std::int64_t* scratch = scratch_buffer;
         if (!scratch) {
@@ -58,41 +61,32 @@ struct ACARP_Sort {
             scratch = internal_scratch.data();
         }
         
-        // Initial copy to scratch
         std::memcpy(scratch, data, n * sizeof(std::int64_t));
 
         int counts[K] = {0};
         std::size_t offsets[K] = {0};
 
-        // 1. Plan
         BucketPlan plan = build_bucket_plan(scratch, n);
         BucketLayout layout{plan.num_buckets, counts, offsets};
 
-        // 2. Count
-        const std::uint64_t mask  = plan.bucket_mask;
-        const std::uint8_t  shift = plan.bucket_shift;
-        const std::int64_t  s_min = plan.s_min;
+        // --- Optimized SIMD Counting Pass ---
+        count_buckets(scratch, n, plan, layout);
 
-        for (std::size_t i = 0; i < n; ++i) {
-            std::uint64_t u = static_cast<std::uint64_t>(scratch[i] - s_min);
-            std::uint32_t key = static_cast<std::uint32_t>((u & mask) >> shift);
-            if (key >= (uint32_t)plan.num_buckets) key = plan.num_buckets - 1;
-            ++layout.counts[key];
-        }
-
-        // 3. Offsets
         std::size_t curr_off = 0;
         for (int j = 0; j < layout.num_buckets; ++j) {
             layout.offsets[j] = curr_off;
             curr_off += layout.counts[j];
         }
 
-        // 4. Permute (SMB)
         std::size_t write_ptr[K];
         for (int j = 0; j < layout.num_buckets; ++j) write_ptr[j] = layout.offsets[j];
 
         alignas(64) std::int64_t buffer[K][BUF_CAP];
         std::uint8_t buf_size[K] = {0};
+
+        const std::uint64_t mask  = plan.bucket_mask;
+        const std::uint8_t  shift = plan.bucket_shift;
+        const std::int64_t  s_min = plan.s_min;
 
         for (std::size_t i = 0; i < n; ++i) {
             std::int64_t v = scratch[i];
@@ -117,7 +111,6 @@ struct ACARP_Sort {
             }
         }
 
-        // 5. Finish
         for (int j = 0; j < layout.num_buckets; ++j) {
             if (layout.counts[j] > 1) {
                 std::sort(data + layout.offsets[j], data + layout.offsets[j] + layout.counts[j]);
@@ -126,6 +119,44 @@ struct ACARP_Sort {
     }
 
 private:
+    static void count_buckets(const std::int64_t* a, std::size_t n, const BucketPlan& plan, BucketLayout& layout) {
+        const std::uint64_t mask  = plan.bucket_mask;
+        const std::uint8_t  shift = plan.bucket_shift;
+        const std::int64_t  s_min = plan.s_min;
+        std::size_t i = 0;
+
+#if defined(__AVX2__)
+        // SIMD Path: Process 4 elements per iteration
+        __m256i v_s_min = _mm256_set1_epi64x(s_min);
+        __m256i v_mask  = _mm256_set1_epi64x(mask);
+
+        for (; i + 4 <= n; i += 4) {
+            // Load 4x 64-bit ints
+            __m256i v_data = _mm256_loadu_si256((const __m256i*)&a[i]);
+            // Subtract s_min across all 4
+            __m256i v_norm = _mm256_sub_epi64(v_data, v_s_min);
+            // Mask to get bucket bits
+            __m256i v_masked = _mm256_and_si256(v_norm, v_mask);
+
+            // Extract and increment counters
+            alignas(32) std::uint64_t keys[4];
+            _mm256_store_si256((__m256i*)keys, v_masked);
+
+            layout.counts[keys[0] >> shift]++;
+            layout.counts[keys[1] >> shift]++;
+            layout.counts[keys[2] >> shift]++;
+            layout.counts[keys[3] >> shift]++;
+        }
+#endif
+        // Scalar Fallback / Remainder
+        for (; i < n; ++i) {
+            std::uint64_t u = static_cast<std::uint64_t>(a[i] - s_min);
+            std::uint32_t key = static_cast<std::uint32_t>((u & mask) >> shift);
+            if (key >= (uint32_t)plan.num_buckets) key = plan.num_buckets - 1;
+            ++layout.counts[key];
+        }
+    }
+
     static BucketPlan build_bucket_plan(const std::int64_t* a, std::size_t n) {
         const std::size_t sample_size = std::min<std::size_t>(n, 512);
         const std::size_t stride = n / sample_size;
