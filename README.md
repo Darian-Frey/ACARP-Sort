@@ -32,7 +32,7 @@ ACARP solves this by:
 ## 🛠 Usage
 ACARP-Sort is a **header-only library**. Simply drop `acarp_sort.hpp` into your project.
 
-~~~cpp
+~~~
 #include "acarp_sort.hpp"
 #include <vector>
 
@@ -40,7 +40,28 @@ int main() {
     std::vector<std::int64_t> data = { /* ... */ };
     
     // Standard usage
+
     acarp::ACARP_Sort<256, 16>::sort(data.data(), data.size());
     
     return 0;
 }
+~~~
+
+## Advanced Optimization
+To eliminate allocation overhead in performance-critical paths, pass a pre-allocated scratch buffer:
+~~~
+std::vector<std::int64_t> scratch(data.size());
+acarp::ACARP_Sort<256, 16>::sort(data.data(), data.size(), scratch.data());
+~~~
+
+## 🏗 Technical Origin
+This project was developed using the SCHEMA_V5 Protocol, a graph-addressable reasoning framework. Every major architectural decision (from SMB integration to Tiling) was audited as a state transition within a multi-branch reasoning graph to ensure logic stability and hardware alignment.
+
+REF_ID: st-final-acarp-2026-02-16
+
+Lead Architect: Gemini (SCHEMA_V5 Integrated)
+
+Technical Contributor: Microsoft Copilot
+
+## ⚖️ License
+Distributed under the MIT License. See LICENSE for more information.
